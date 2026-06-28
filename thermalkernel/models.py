@@ -54,12 +54,24 @@ class Construction(BaseModel):
     area: float                            # площадь конструкции, м²
     n: float = 1.0                         # коэффициент учёта положения наружной поверхности (СП 50, табл. 6)
     operation_condition: OperationCondition = OperationCondition.B  # условие эксплуатации А или Б
+    # Коэффициент теплотехнической однородности r (0 < r ≤ 1).
+    # R₀_пр = R₀_усл · r  (СП 50.13330.2012, прил. Е, п. Е.1)
+    # r = 1.0 означает однородную конструкцию без мостиков холода.
+    # Значение r < 1.0 должен задать пользователь по результатам расчёта конструктива.
+    r_coef: float = 1.0
 
     @field_validator("area")
     @classmethod
     def area_positive(cls, v: float) -> float:
         if v <= 0:
             raise ValueError(f"Площадь конструкции должна быть > 0 м², получено: {v}")
+        return v
+
+    @field_validator("r_coef")
+    @classmethod
+    def r_coef_valid(cls, v: float) -> float:
+        if not (0 < v <= 1.0):
+            raise ValueError(f"Коэффициент теплотехнической однородности r должен быть в диапазоне (0; 1], получено: {v}")
         return v
 
     @model_validator(mode="after")
@@ -129,8 +141,15 @@ class BuildingResult(BaseModel):
     q_transmission_w: float
     # Инфильтрационные теплопотери, Вт
     q_infiltration_w: float
-    # Суммарные теплопотери, Вт
+    # Суммарные теплопотери здания (трансмиссия + инфильтрация), Вт
     q_total_w: float
+    # Бытовые (внутренние) теплопоступления, кВт·ч/год
+    q_internal_gains_kwh: float
+    # Суммарные потери за отопительный период до вычета поступлений, кВт·ч/год
+    q_losses_kwh: float
+    # Суммарные потери за отопительный период после вычета бытовых поступлений, кВт·ч/год
+    # q_net_kwh = (q_losses_kwh − q_internal_gains_kwh) / eta_sys
+    q_net_kwh: float
     # Удельный расход тепловой энергии на отопление, кВт·ч/(м²·год)
     specific_heat_demand: float
     # Нормируемый (базовый) удельный расход тепловой энергии, кВт·ч/(м²·год)

@@ -173,24 +173,53 @@ class TestQInfiltration:
 
     def test_known_values_novosibirsk(self, coefficients, climate_novosibirsk):
         """
-        V=600 м³, t_v=20, t5=-39 (Новосибирск).
+        V=600 м³, t_v=20, t5=-39 (Новосибирск), жилое здание (residential, n=0.5).
         Q = 1.005 · 1.2 · 600 · 0.5 · (20−(−39)) · 1000 / 3600
           = 1.005 · 1.2 · 600 · 0.5 · 59 · 1000 / 3600
           ≈ 5929.5 Вт
+        Ручная поверка (эталона СП нет).
         """
         building = _demo_building()
         q_inf = q_infiltration(building, climate_novosibirsk, coefficients)
 
         c_air = 1.005
         rho_air = 1.2
-        n_inf = 0.5
+        n_inf = 0.5   # residential из справочника
         delta_t = 20.0 - climate_novosibirsk.t5
         expected = c_air * rho_air * 600.0 * n_inf * delta_t * 1000.0 / 3600.0
 
         assert pytest.approx(q_inf, rel=1e-6) == expected
 
+    def test_residential_vs_nonresidential_n(self, coefficients, climate_novosibirsk):
+        """
+        Если для residential и nonresidential заданы одинаковые n=0.5 в справочнике,
+        результат совпадает. Тест фиксирует, что диспетч по типу здания работает:
+        функция не падает и возвращает > 0 для обоих типов.
+        Ручная поверка (эталона СП нет).
+        """
+        b_res = Building(
+            city="novosibirsk", building_type=BuildingType.RESIDENTIAL,
+            floors=5, t_v=20.0, constructions=[_wall_construction(0.4)],
+            heated_area=200.0, heated_volume=600.0,
+        )
+        b_non = Building(
+            city="novosibirsk", building_type=BuildingType.NONRESIDENTIAL,
+            floors=5, t_v=20.0, constructions=[_wall_construction(0.4)],
+            heated_area=200.0, heated_volume=600.0,
+        )
+        q_res = q_infiltration(b_res, climate_novosibirsk, coefficients)
+        q_non = q_infiltration(b_non, climate_novosibirsk, coefficients)
+        # оба должны быть положительными
+        assert q_res > 0
+        assert q_non > 0
+        # при одинаковом n (оба 0.5 в справочнике) значения равны
+        n_res = coefficients["infiltration"]["n_infiltration"]["residential"]["value"]
+        n_non = coefficients["infiltration"]["n_infiltration"]["nonresidential"]["value"]
+        if n_res == n_non:
+            assert pytest.approx(q_res, rel=1e-9) == q_non
+
     def test_volume_scales_linearly(self, coefficients, climate_novosibirsk):
-        """Удвоение объёма → удвоение Q_инф."""
+        """Удвоение объёма → удвоение Q_инф. Ручная поверка."""
         b1 = Building(
             city="novosibirsk", building_type=BuildingType.RESIDENTIAL,
             floors=5, t_v=20.0, constructions=[_wall_construction(0.4)],
@@ -216,21 +245,24 @@ class TestQInfiltration:
         Проверка размерностной согласованности: результат в Вт.
         кДж/(кг·°C) · кг/м³ · м³ · 1/ч · °C · (1000 Дж/кДж) / (3600 с/ч) = Вт
         При V=3600 м³, ΔT=1°C, c=1, ρ=1, n=1 → Q = 1000 Вт.
+        Ручная поверка (эталона СП нет).
         """
         b = Building(
             city="novosibirsk", building_type=BuildingType.RESIDENTIAL,
             floors=1, t_v=20.0, constructions=[_wall_construction(0.4)],
             heated_area=100.0, heated_volume=3600.0,
         )
-        # Подменяем коэффициенты inline через простой dict с нужными значениями
+        # n_infiltration задан как dict по типу здания — мокаем обе ветки
         custom_coef = {
             "infiltration": {
                 "c_air": {"value": 1.0},
                 "rho_air": {"value": 1.0},
-                "n_infiltration": {"value": 1.0},
+                "n_infiltration": {
+                    "residential": {"value": 1.0},
+                    "nonresidential": {"value": 1.0},
+                },
             }
         }
-        # t5 Новосибирска -39, t_v=20 → delta_t=59 → не удобно
         # Используем climate с t5=19 → delta_t=1
         custom_climate = Climate(city="test", t5=19.0, t_ot=-10.0, z_ot=200.0, source="test")
         # V=3600, c=1, rho=1, n=1, delta_t=1 → Q = 1*1*3600*1*1*1000/3600 = 1000 Вт
@@ -246,12 +278,17 @@ class TestSpecificHeatDemand:
     """
     # ТРЕБУЕТ эталона СП и верификации экспертом.
     Проверяется размерностная согласованность формулы на контрольных числах.
+
+    specific_heat_demand возвращает кортеж (q_уд, q_losses_kwh, q_internal_gains_kwh, q_net_kwh).
+    Без coefficients работает упрощённая формула: q_уд = Q·z·24/A/1000,
+    q_gains=0, q_net=q_losses.
     """
 
     def test_known_values(self, climate_novosibirsk):
         """
-        Q=1000 Вт, z_ot=200 сут, A_ot=100 м².
-        q_уд = 1000 · 200 · 24 / (100 · 1000) = 48.0 кВт·ч/(м²·год)
+        Q=1000 Вт, z_ot=200 сут, A_ot=100 м² (без coefficients — упрощённая формула).
+        q_уд = 1000 · 200 · 24 / (100 · 1000) = 48.0 кВт·ч/(м²·год).
+        Ручная поверка (эталона СП нет).
         """
         building = Building(
             city="novosibirsk", building_type=BuildingType.RESIDENTIAL,
@@ -259,15 +296,19 @@ class TestSpecificHeatDemand:
             heated_area=100.0, heated_volume=300.0,
         )
         climate = Climate(city="test", t5=-39.0, t_ot=-10.0, z_ot=200.0, source="test")
-        result = specific_heat_demand(1000.0, building, climate)
+        q_sp, q_losses, q_gains, q_net = specific_heat_demand(1000.0, building, climate)
         expected = 1000.0 * 200.0 * 24.0 / (100.0 * 1000.0)
-        assert pytest.approx(result, rel=1e-9) == expected
-        assert pytest.approx(result, rel=1e-9) == 48.0
+        assert pytest.approx(q_sp, rel=1e-9) == expected
+        assert pytest.approx(q_sp, rel=1e-9) == 48.0
+        # без coefficients: нет бытовых поступлений
+        assert q_gains == 0.0
+        assert pytest.approx(q_net, rel=1e-9) == q_losses
 
     def test_unit_check_1w_1day_1sqm(self):
         """
         Q=1000 Вт, z_ot=1 сут, A_ot=24 м² → q_уд = 1000·1·24/(24·1000) = 1.0 кВт·ч/(м²·год).
         Проверка формулы: 1 кВт × 24 ч / 24 м² = 1 кВт·ч/м².
+        Ручная поверка (эталона СП нет).
         """
         building = Building(
             city="novosibirsk", building_type=BuildingType.RESIDENTIAL,
@@ -275,18 +316,24 @@ class TestSpecificHeatDemand:
             heated_area=24.0, heated_volume=60.0,
         )
         climate = Climate(city="test", t5=-39.0, t_ot=-10.0, z_ot=1.0, source="test")
-        result = specific_heat_demand(1000.0, building, climate)
-        assert pytest.approx(result, rel=1e-9) == 1.0
+        q_sp, _, _, _ = specific_heat_demand(1000.0, building, climate)
+        assert pytest.approx(q_sp, rel=1e-9) == 1.0
 
     def test_scales_with_q_total(self, climate_novosibirsk):
-        """Удвоение Q_total → удвоение q_уд."""
+        """
+        Удвоение Q_total → удвоение q_уд (без coefficients, линейная зависимость).
+        Ручная поверка (эталона СП нет).
+        """
         building = _demo_building()
-        r1 = specific_heat_demand(1000.0, building, climate_novosibirsk)
-        r2 = specific_heat_demand(2000.0, building, climate_novosibirsk)
-        assert pytest.approx(r2, rel=1e-9) == 2 * r1
+        q1, _, _, _ = specific_heat_demand(1000.0, building, climate_novosibirsk)
+        q2, _, _, _ = specific_heat_demand(2000.0, building, climate_novosibirsk)
+        assert pytest.approx(q2, rel=1e-9) == 2 * q1
 
     def test_scales_inversely_with_area(self, climate_novosibirsk):
-        """Удвоение площади → вдвое меньше q_уд."""
+        """
+        Удвоение площади → вдвое меньше q_уд (без coefficients).
+        Ручная поверка (эталона СП нет).
+        """
         b_100 = Building(
             city="novosibirsk", building_type=BuildingType.RESIDENTIAL,
             floors=5, t_v=20.0, constructions=[_wall_construction(0.4)],
@@ -297,9 +344,91 @@ class TestSpecificHeatDemand:
             floors=5, t_v=20.0, constructions=[_wall_construction(0.4)],
             heated_area=200.0, heated_volume=600.0,
         )
-        r_100 = specific_heat_demand(1000.0, b_100, climate_novosibirsk)
-        r_200 = specific_heat_demand(1000.0, b_200, climate_novosibirsk)
+        r_100, _, _, _ = specific_heat_demand(1000.0, b_100, climate_novosibirsk)
+        r_200, _, _, _ = specific_heat_demand(1000.0, b_200, climate_novosibirsk)
         assert pytest.approx(r_200, rel=1e-9) == r_100 / 2
+
+    def test_with_coefficients_gains_reduce_q_net(self, climate_novosibirsk, coefficients):
+        """
+        С coefficients: бытовые теплопоступления уменьшают q_net.
+        q_net < q_losses → q_уд_полная < q_уд_упрощённая.
+        Ручная поверка (эталона СП нет).
+        """
+        building = _demo_building()
+        q_sp_simple, q_losses, q_gains_zero, _ = specific_heat_demand(1000.0, building, climate_novosibirsk)
+        q_sp_full, q_losses2, q_gains, q_net = specific_heat_demand(1000.0, building, climate_novosibirsk, coefficients)
+        # q_losses должны совпадать (одна формула)
+        assert pytest.approx(q_losses, rel=1e-9) == q_losses2
+        # бытовые поступления > 0
+        assert q_gains > 0.0
+        # нетто-потребность меньше потерь
+        assert q_net < q_losses
+        # удельный расход с полной формулой меньше упрощённой
+        assert q_sp_full < q_sp_simple
+
+    def test_with_coefficients_eta_sys_increases_q_sp(self, climate_novosibirsk, coefficients):
+        """
+        eta_sys < 1 увеличивает q_уд по сравнению с eta_sys=1.
+        Мокаем coefficients с eta_sys=1.0 и сравниваем.
+        Ручная поверка (эталона СП нет).
+        """
+        import copy
+        building = _demo_building()
+        coef_eta1 = copy.deepcopy(coefficients)
+        coef_eta1["heating_system"]["eta_sys"]["value"] = 1.0
+
+        q_sp_real, _, q_gains_real, q_net_real = specific_heat_demand(
+            5000.0, building, climate_novosibirsk, coefficients
+        )
+        q_sp_eta1, _, _, q_net_eta1 = specific_heat_demand(
+            5000.0, building, climate_novosibirsk, coef_eta1
+        )
+        # eta_sys < 1 → q_уд выше
+        eta = coefficients["heating_system"]["eta_sys"]["value"]
+        if eta < 1.0:
+            assert q_sp_real > q_sp_eta1
+
+    def test_tuple_traceability(self, climate_novosibirsk, coefficients):
+        """
+        Проверка согласованности кортежа (q_уд, q_losses, q_gains, q_net):
+        q_net ≈ (q_losses − q_gains·v_r) / eta_sys,
+        q_уд = q_net / A_от.
+        Ручная поверка (эталона СП нет).
+        """
+        building = _demo_building()
+        q_total = 5000.0
+        q_sp, q_losses, q_gains, q_net = specific_heat_demand(
+            q_total, building, climate_novosibirsk, coefficients
+        )
+        v_r = coefficients["heating_system"]["v_r"]["value"]
+        eta_sys = coefficients["heating_system"]["eta_sys"]["value"]
+
+        expected_q_losses = q_total * climate_novosibirsk.z_ot * 24.0 / 1000.0
+        q_internal_per_sqm = coefficients["heat_gains"]["q_internal_per_sqm"]["residential"]["value"]
+        expected_q_gains = q_internal_per_sqm * building.heated_area * climate_novosibirsk.z_ot * 24.0 / 1000.0
+        expected_q_net = (expected_q_losses - expected_q_gains * v_r) / eta_sys
+        expected_q_sp = expected_q_net / building.heated_area
+
+        assert pytest.approx(q_losses, rel=1e-9) == expected_q_losses
+        assert pytest.approx(q_gains, rel=1e-9) == expected_q_gains
+        assert pytest.approx(q_net, rel=1e-9) == expected_q_net
+        assert pytest.approx(q_sp, rel=1e-9) == expected_q_sp
+
+    def test_q_net_floor_zero(self, coefficients):
+        """
+        Если бытовые поступления > теплопотерь, q_net не уходит в минус (защита floor(0)).
+        Ручная поверка (эталона СП нет).
+        """
+        building = Building(
+            city="novosibirsk", building_type=BuildingType.RESIDENTIAL,
+            floors=5, t_v=20.0, constructions=[_wall_construction(0.4)],
+            heated_area=10000.0, heated_volume=30000.0,
+        )
+        # Q_total крошечный, площадь огромная → поступления > потерь
+        climate = Climate(city="test", t5=-1.0, t_ot=-0.5, z_ot=1.0, source="test")
+        q_sp, _, _, q_net = specific_heat_demand(0.001, building, climate, coefficients)
+        assert q_net >= 0.0
+        assert q_sp >= 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -473,18 +602,39 @@ class TestEvaluateBuilding:
         """
         # ТРЕБУЕТ эталона СП и верификации экспертом.
         Демо-здание: одна стена газобетон 0.4 м / 20 м², V=600, A=200.
-        Ожидаемый q_уд ≈ 176.62 кВт·ч/(м²·год) — ручная поверка.
+        Полная методика с вычетом бытовых поступлений и КПД системы.
+
+        Ручная поверка:
+            Q_тр = 20 · (20−(−39)) · 1.0 / (1/8.7 + 0.4/0.17 + 1/23) ≈ 469.86 Вт
+            Q_инф = 1.005·1.2·600·0.5·59·1000/3600 ≈ 5929.5 Вт
+            Q_total ≈ 6399.36 Вт
+            Q_losses = 6399.36 · 230 · 24 / 1000 ≈ 35324.49 кВт·ч/год
+            Q_gains = 17 · 200 · 230 · 24 / 1000 = 18768 кВт·ч/год
+            Q_net = (35324.49 − 18768·0.8) / 0.85 ≈ 23894.23 кВт·ч/год
+            q_уд = 23894.23 / 200 ≈ 119.47 кВт·ч/(м²·год)
         """
         building = _demo_building()
         result = evaluate_building(building, climate_novosibirsk, materials, coefficients)
+
         expected_q_tr = 20.0 * (20.0 - climate_novosibirsk.t5) * 1.0 / (
             1 / 8.7 + 0.4 / 0.17 + 1 / 23.0
         )
         c_air, rho_air, n_inf = 1.005, 1.2, 0.5
         expected_q_inf = c_air * rho_air * 600.0 * n_inf * (20.0 - climate_novosibirsk.t5) * 1000.0 / 3600.0
         expected_q_total = expected_q_tr + expected_q_inf
-        expected_q_sp = expected_q_total * climate_novosibirsk.z_ot * 24.0 / (200.0 * 1000.0)
+        z_ot = climate_novosibirsk.z_ot
+        q_losses = expected_q_total * z_ot * 24.0 / 1000.0
+        q_gains = 17.0 * 200.0 * z_ot * 24.0 / 1000.0
+        v_r = coefficients["heating_system"]["v_r"]["value"]
+        eta_sys = coefficients["heating_system"]["eta_sys"]["value"]
+        q_net = (q_losses - q_gains * v_r) / eta_sys
+        expected_q_sp = q_net / 200.0
+
         assert pytest.approx(result.specific_heat_demand, rel=1e-6) == expected_q_sp
+        # трассируемость: поля BuildingResult согласованы
+        assert pytest.approx(result.q_losses_kwh, rel=1e-6) == q_losses
+        assert pytest.approx(result.q_internal_gains_kwh, rel=1e-6) == q_gains
+        assert pytest.approx(result.q_net_kwh, rel=1e-6) == q_net
 
     def test_delta_from_norm_consistent(self, materials, coefficients, climate_novosibirsk):
         """delta_from_norm = (specific_heat_demand − normative_heat_demand) / normative_heat_demand."""
@@ -608,3 +758,182 @@ class TestBuildingValidation:
         assert b.heated_area == 200.0
         assert b.heated_volume == 600.0
         assert len(b.constructions) == 1
+
+
+# ---------------------------------------------------------------------------
+# 7. Мостики холода: r_coef < 1.0
+# ---------------------------------------------------------------------------
+
+class TestRCoef:
+    """
+    Тесты коэффициента теплотехнической однородности r (мостики холода).
+    r_coef < 1.0 → R₀_пр уменьшается → теплопотери растут → вердикт может ухудшиться.
+    Ручная поверка (эталона СП нет).
+    """
+
+    def test_r_coef_default_is_one(self):
+        """По умолчанию r_coef=1.0 (однородная конструкция)."""
+        c = Construction(
+            type=ConstructionType.WALL,
+            layers=[Layer(material="gazobeton", thickness=0.4)],
+            area=10.0,
+        )
+        assert c.r_coef == 1.0
+
+    def test_r_coef_zero_raises(self):
+        """r_coef=0 → ValidationError (граница исключается: 0 < r ≤ 1)."""
+        with pytest.raises(ValidationError, match="теплотехнической однородности"):
+            Construction(
+                type=ConstructionType.WALL,
+                layers=[Layer(material="gazobeton", thickness=0.4)],
+                area=10.0,
+                r_coef=0.0,
+            )
+
+    def test_r_coef_negative_raises(self):
+        """r_coef < 0 → ValidationError."""
+        with pytest.raises(ValidationError):
+            Construction(
+                type=ConstructionType.WALL,
+                layers=[Layer(material="gazobeton", thickness=0.4)],
+                area=10.0,
+                r_coef=-0.5,
+            )
+
+    def test_r_coef_greater_than_one_raises(self):
+        """r_coef > 1 → ValidationError (физически невозможно)."""
+        with pytest.raises(ValidationError):
+            Construction(
+                type=ConstructionType.WALL,
+                layers=[Layer(material="gazobeton", thickness=0.4)],
+                area=10.0,
+                r_coef=1.01,
+            )
+
+    def test_r_coef_one_accepted(self):
+        """r_coef=1.0 принимается (включительная верхняя граница)."""
+        c = Construction(
+            type=ConstructionType.WALL,
+            layers=[Layer(material="gazobeton", thickness=0.4)],
+            area=10.0,
+            r_coef=1.0,
+        )
+        assert c.r_coef == 1.0
+
+    def test_r_coef_08_accepted(self):
+        """r_coef=0.8 принимается."""
+        c = Construction(
+            type=ConstructionType.WALL,
+            layers=[Layer(material="gazobeton", thickness=0.4)],
+            area=10.0,
+            r_coef=0.8,
+        )
+        assert c.r_coef == 0.8
+
+    def test_r_coef_reduces_r0_pr(self, materials, coefficients, climate_novosibirsk):
+        """
+        r_coef=0.8 → R₀_пр на 20% меньше, чем при r_coef=1.0.
+        Ручная поверка (эталона СП нет).
+        """
+        from thermalkernel.calc import r0_pr, r0_usl
+        c1 = Construction(
+            type=ConstructionType.WALL,
+            layers=[Layer(material="gazobeton", thickness=0.4)],
+            area=10.0, r_coef=1.0,
+        )
+        c08 = Construction(
+            type=ConstructionType.WALL,
+            layers=[Layer(material="gazobeton", thickness=0.4)],
+            area=10.0, r_coef=0.8,
+        )
+        alpha_in = coefficients["surface_heat_transfer"]["alpha_in"]["value"]
+        alpha_out = coefficients["surface_heat_transfer"]["alpha_out"]["value"]
+        r0u, _ = r0_usl(c1, materials, alpha_in, alpha_out)
+        r0p_1 = r0_pr(r0u, 1.0)
+        r0p_08 = r0_pr(r0u, 0.8)
+        assert pytest.approx(r0p_08, rel=1e-9) == r0p_1 * 0.8
+
+    def test_r_coef_increases_heat_loss(self, materials, coefficients, climate_novosibirsk):
+        """
+        r_coef=0.8 → теплопотери больше, чем при r_coef=1.0.
+        Ручная поверка (эталона СП нет).
+        """
+        from thermalkernel.calc import q_transmission_single
+        c1 = Construction(
+            type=ConstructionType.WALL,
+            layers=[Layer(material="gazobeton", thickness=0.4)],
+            area=20.0, n=1.0, r_coef=1.0,
+        )
+        c08 = Construction(
+            type=ConstructionType.WALL,
+            layers=[Layer(material="gazobeton", thickness=0.4)],
+            area=20.0, n=1.0, r_coef=0.8,
+        )
+        alpha_in = coefficients["surface_heat_transfer"]["alpha_in"]["value"]
+        alpha_out = coefficients["surface_heat_transfer"]["alpha_out"]["value"]
+        q1, r0p_1 = q_transmission_single(c1, climate_novosibirsk, 20.0, materials, alpha_in, alpha_out)
+        q08, r0p_08 = q_transmission_single(c08, climate_novosibirsk, 20.0, materials, alpha_in, alpha_out)
+        assert q08 > q1
+        assert r0p_08 < r0p_1
+        # пропорция: Q обратно пропорциональна R₀_пр → Q08/Q1 = R0p1/R0p08 = 1/0.8
+        assert pytest.approx(q08 / q1, rel=1e-9) == 1.0 / 0.8
+
+    def test_r_coef_can_change_verdict(self, materials, coefficients, climate_novosibirsk):
+        """
+        Конструкция с r_coef=1.0 может соответствовать норме,
+        а с r_coef=0.8 — нет (мостики холода снижают R₀_пр).
+        Ручная поверка: газобетон 0.4 м, Новосибирск — проверяем что r_coef влияет на вердикт.
+        Если оба не соответствуют, проверяем хотя бы что r0_pr снижается.
+        """
+        from thermalkernel.calc import evaluate
+        c1 = Construction(
+            type=ConstructionType.WALL,
+            layers=[Layer(material="gazobeton", thickness=0.4)],
+            area=10.0, r_coef=1.0,
+        )
+        c08 = Construction(
+            type=ConstructionType.WALL,
+            layers=[Layer(material="gazobeton", thickness=0.4)],
+            area=10.0, r_coef=0.8,
+        )
+        res1 = evaluate(c1, climate_novosibirsk, 20.0, materials, coefficients)
+        res08 = evaluate(c08, climate_novosibirsk, 20.0, materials, coefficients)
+        assert res08.r0_pr < res1.r0_pr
+        # вердикт либо одинаково плохой, либо у r_coef=0.8 хуже
+        verdict_order = {"соответствует": 0, "не соответствует": 1}
+        assert verdict_order[res08.verdict] >= verdict_order[res1.verdict]
+
+    def test_r_coef_propagates_through_evaluate_building(
+        self, materials, coefficients, climate_novosibirsk
+    ):
+        """
+        В evaluate_building per_construction.r0_pr отражает r_coef < 1.0.
+        Ручная поверка (эталона СП нет).
+        """
+        c1 = Construction(
+            type=ConstructionType.WALL,
+            layers=[Layer(material="gazobeton", thickness=0.4)],
+            area=20.0, n=1.0, r_coef=1.0,
+        )
+        c08 = Construction(
+            type=ConstructionType.WALL,
+            layers=[Layer(material="gazobeton", thickness=0.4)],
+            area=20.0, n=1.0, r_coef=0.8,
+        )
+        b1 = Building(
+            city="novosibirsk", building_type=BuildingType.RESIDENTIAL,
+            floors=5, t_v=20.0, constructions=[c1],
+            heated_area=200.0, heated_volume=600.0,
+        )
+        b08 = Building(
+            city="novosibirsk", building_type=BuildingType.RESIDENTIAL,
+            floors=5, t_v=20.0, constructions=[c08],
+            heated_area=200.0, heated_volume=600.0,
+        )
+        res1 = evaluate_building(b1, climate_novosibirsk, materials, coefficients)
+        res08 = evaluate_building(b08, climate_novosibirsk, materials, coefficients)
+        # R₀_пр в per_construction снижен
+        assert res08.per_construction[0].r0_pr < res1.per_construction[0].r0_pr
+        # теплопотери выросли
+        assert res08.q_transmission_w > res1.q_transmission_w
+        assert res08.specific_heat_demand > res1.specific_heat_demand

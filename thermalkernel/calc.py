@@ -131,15 +131,17 @@ def q_transmission_single(
     Трансмиссионные теплопотери одной ограждающей конструкции, Вт.
 
     Q_тр_i = A_i · (tв − tн) · n_i / R₀_пр_i
+    R₀_пр_i = R₀_усл_i · r_i  (r берётся из Construction.r_coef)
 
     tн — температура наиболее холодной пятидневки (t5) из климатических данных.
 
-    Ref: СП 50.13330.2012, п. 9.1; СП 60.13330.2020, п. 6.3 (TODO: сверить пункты).
+    Ref: СП 50.13330.2012, п. 9.1; прил. Е, п. Е.1; СП 60.13330.2020, п. 6.3 (TODO: сверить пункты).
 
     Возвращает (q_w, r0_pr): теплопотери в Вт и приведённое сопротивление конструкции.
     """
     r0u, _ = r0_usl(construction, materials, alpha_in, alpha_out)
-    r0p = r0_pr(r0u)
+    # r_coef из модели Construction учитывает мостики холода (r < 1.0 снижает R₀_пр)
+    r0p = r0_pr(r0u, construction.r_coef)
     # tн = температура наиболее холодной пятидневки
     delta_t = t_v - climate.t5
     q_w = construction.area * delta_t * construction.n / r0p
@@ -161,20 +163,28 @@ def q_infiltration(
         c_в   — удельная теплоёмкость воздуха, кДж/(кг·°C)
         ρ_в   — плотность воздуха, кг/м³
         V     — отапливаемый объём здания, м³
-        n_ин  — кратность инфильтрации, 1/ч
+        n_ин  — кратность инфильтрации, 1/ч (зависит от типа здания)
         tв    — расчётная температура внутреннего воздуха, °C
         tн    — температура наиболее холодной пятидневки (t5), °C
 
     Результат — Вт. c_в задан в кДж/(кг·°C), поэтому перевод единиц: × 1000 (кДж→Дж) / 3600 (ч→с) = Дж/с = Вт.
 
-    TODO: уточнить по СП 60.13330.2020, п. 8. Значения n_ин и параметры воздуха предварительные.
+    Кратность инфильтрации выбирается по типу здания (residential / nonresidential).
 
-    Ref: СП 60.13330.2020, п. 8 (TODO: сверить пункт).
+    Ref: СП 60.13330.2020, п. 8 (TODO: сверить пункт с офиц. текстом СП).
     """
     inf_cfg = coefficients["infiltration"]
     c_air = inf_cfg["c_air"]["value"]       # кДж/(кг·°C)
     rho_air = inf_cfg["rho_air"]["value"]   # кг/м³
-    n_inf = inf_cfg["n_infiltration"]["value"]  # 1/ч
+    # кратность инфильтрации по типу здания
+    n_inf_cfg = inf_cfg["n_infiltration"]
+    building_type = building.building_type.value
+    if building_type not in n_inf_cfg:
+        raise ValueError(
+            f"Тип здания '{building_type}' отсутствует в n_infiltration справочника. "
+            f"Допустимые типы: {list(n_inf_cfg.keys())}"
+        )
+    n_inf = n_inf_cfg[building_type]["value"]  # 1/ч
     delta_t = building.t_v - climate.t5    # °C
     # Вт = кДж/(кг·°C) · кг/м³ · м³ · 1/ч · °C · (1000 Дж/кДж) / (3600 с/ч)
     q_w = c_air * rho_air * building.heated_volume * n_inf * delta_t * 1000.0 / 3600.0
@@ -185,23 +195,60 @@ def specific_heat_demand(
     q_total_w: float,
     building: Building,
     climate: Climate,
-) -> float:
+    coefficients: dict | None = None,
+) -> tuple[float, float, float, float]:
     """
     Удельный расход тепловой энергии на отопление, кВт·ч/(м²·год).
 
-    Упрощённая формула:
-        q_уд = Q_сум · z_от · 24 / (А_от · 1000)
+    Полная формула с учётом бытовых теплопоступлений и КПД системы отопления:
+
+        Q_потери = Q_сум · z_от · 24 / 1000          [кВт·ч/год]
+        Q_быт    = q_внутр · A_от · z_от · 24 / 1000  [кВт·ч/год]
+        Q_нетто  = (Q_потери − Q_быт · v_r) / eta_sys
+        q_уд     = Q_нетто / A_от                     [кВт·ч/(м²·год)]
 
     где:
-        Q_сум — суммарные теплопотери здания в расчётных условиях, Вт
-        z_от  — продолжительность отопительного периода, сут
-        24    — число часов в сутках
-        А_от  — отапливаемая площадь, м²
-        1000  — перевод Вт → кВт
+        Q_сум    — суммарные теплопотери здания в расчётных условиях (трансм. + инфильт.), Вт
+        z_от     — продолжительность отопительного периода, сут
+        q_внутр  — удельные бытовые теплопоступления, Вт/м² (из справочника)
+        A_от     — отапливаемая площадь, м²
+        v_r      — коэффициент авторегулирования (снижение использования теплопоступлений)
+        eta_sys  — КПД системы отопления
 
-    Ref: СП 50.13330.2012, п. 10.1 (TODO: сверить номер пункта и формулу).
+    Если coefficients не переданы — используется упрощённая формула без поступлений
+    (обратная совместимость для тестов старого API).
+
+    Возвращает кортеж (q_уд, q_losses_kwh, q_internal_gains_kwh, q_net_kwh).
+
+    Ref: СП 50.13330.2012, п. 10.1 / форм. (10.1) (TODO: сверить пункт, формулу и состав коэффициентов с офиц. текстом СП).
     """
-    return q_total_w * climate.z_ot * 24.0 / (building.heated_area * 1000.0)
+    # суммарные теплопотери за отопительный период, кВт·ч/год
+    q_losses_kwh = q_total_w * climate.z_ot * 24.0 / 1000.0
+
+    if coefficients is None:
+        # упрощённая формула (без учёта поступлений) — обратная совместимость
+        q_sp = q_losses_kwh / building.heated_area
+        return q_sp, q_losses_kwh, 0.0, q_losses_kwh
+
+    building_type_key = building.building_type.value
+    heat_gains_cfg = coefficients["heat_gains"]
+    q_internal_per_sqm = heat_gains_cfg["q_internal_per_sqm"][building_type_key]["value"]  # Вт/м²
+    hs = coefficients["heating_system"]
+    eta_sys = hs["eta_sys"]["value"]
+    v_r = hs["v_r"]["value"]
+
+    # бытовые теплопоступления за отопительный период, кВт·ч/год
+    q_internal_gains_kwh = q_internal_per_sqm * building.heated_area * climate.z_ot * 24.0 / 1000.0
+
+    # нетто-потребность в тепле с учётом поступлений и КПД, кВт·ч/год
+    q_net_kwh = (q_losses_kwh - q_internal_gains_kwh * v_r) / eta_sys
+
+    # защита от отрицательного q_уд (бытовые поступления не могут давать «антиотопление»)
+    if q_net_kwh < 0.0:
+        q_net_kwh = 0.0
+
+    q_sp = q_net_kwh / building.heated_area
+    return q_sp, q_losses_kwh, q_internal_gains_kwh, q_net_kwh
 
 
 def energy_class(specific_demand: float, normative_demand: float) -> str:
@@ -266,7 +313,9 @@ def evaluate_building(
     q_inf = q_infiltration(building, climate, coefficients)
     q_total = q_tr_total + q_inf
 
-    q_sp = specific_heat_demand(q_total, building, climate)
+    q_sp, q_losses_kwh, q_internal_gains_kwh, q_net_kwh = specific_heat_demand(
+        q_total, building, climate, coefficients
+    )
 
     norm_demand = get_normative_heat_demand(
         building.building_type.value, building.floors, coefficients
@@ -279,7 +328,9 @@ def evaluate_building(
     sp_refs = [
         refs.Q_TRANSMISSION,
         refs.Q_INFILTRATION,
-        refs.SPECIFIC_HEAT_DEMAND,
+        refs.SPECIFIC_HEAT_DEMAND_FULL,
+        refs.INTERNAL_HEAT_GAINS,
+        refs.HEATING_SYSTEM_ETA,
         refs.NORMATIVE_HEAT_DEMAND,
         refs.ENERGY_CLASS,
     ]
@@ -288,6 +339,9 @@ def evaluate_building(
         q_transmission_w=q_tr_total,
         q_infiltration_w=q_inf,
         q_total_w=q_total,
+        q_internal_gains_kwh=q_internal_gains_kwh,
+        q_losses_kwh=q_losses_kwh,
+        q_net_kwh=q_net_kwh,
         specific_heat_demand=q_sp,
         normative_heat_demand=norm_demand,
         delta_from_norm=delta,
@@ -324,8 +378,8 @@ def evaluate(
     # шаг 1–2: условное сопротивление
     r0u, r_layers = r0_usl(construction, materials, alpha_in, alpha_out)
 
-    # шаг 3: приведённое (мостики не учтены → r=1.0)
-    r0p = r0_pr(r0u)
+    # шаг 3: приведённое с учётом коэффициента теплотехнической однородности из модели
+    r0p = r0_pr(r0u, construction.r_coef)
 
     # шаг 4: ГСОП
     gsop_val = gsop(t_v, climate)

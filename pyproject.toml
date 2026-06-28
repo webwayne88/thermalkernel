@@ -1,20 +1,51 @@
 [build-system]
-requires = ["setuptools>=42"]
+requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "thermalkernel"
-version = "0.1.0"
+version = "0.2.0"
 description = "Детерминированное расчётное ядро тепловой защиты зданий по СП 50.13330.2012"
+readme = "README.md"
 requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [
+    { name = "ThermalKernel authors", email = "nikagubanova29@gmail.com" },
+]
+keywords = [
+    "теплотехника",
+    "СП 50",
+    "energy-efficiency",
+    "building",
+    "thermal",
+    "heat-loss",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Natural Language :: Russian",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+]
 dependencies = [
     "pydantic>=2",
 ]
+
+[project.urls]
+Homepage = "https://github.com/webwayne88/thermalkernel"
+Repository = "https://github.com/webwayne88/thermalkernel"
+Issues = "https://github.com/webwayne88/thermalkernel/issues"
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
     "ruff>=0.4",
+    "build",
+    "twine",
 ]
 
 [project.scripts]
@@ -29,7 +60,7 @@ thermalkernel = ["data/*.json"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
