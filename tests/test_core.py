@@ -176,7 +176,7 @@ class TestRNorm:
     def test_wall(self, coefficients):
         """wall: a=0.00035, b=1.4, ГСОП=6601 → 3.71035."""
         coeffs = get_r_norm_coeffs("wall", coefficients)
-        result = r_norm("wall", 6601.0, coeffs)
+        result = r_norm(6601.0, coeffs)
         expected = 0.00035 * 6601.0 + 1.4
         assert pytest.approx(result, rel=1e-9) == expected
         assert pytest.approx(result, abs=0.001) == 3.71035
@@ -184,21 +184,21 @@ class TestRNorm:
     def test_roof(self, coefficients):
         """roof: a=0.0005, b=2.2."""
         coeffs = get_r_norm_coeffs("roof", coefficients)
-        result = r_norm("roof", 6601.0, coeffs)
+        result = r_norm(6601.0, coeffs)
         expected = 0.0005 * 6601.0 + 2.2
         assert pytest.approx(result, rel=1e-9) == expected
 
     def test_floor(self, coefficients):
         """floor: a=0.00045, b=1.9."""
         coeffs = get_r_norm_coeffs("floor", coefficients)
-        result = r_norm("floor", 6601.0, coeffs)
+        result = r_norm(6601.0, coeffs)
         expected = 0.00045 * 6601.0 + 1.9
         assert pytest.approx(result, rel=1e-9) == expected
 
     def test_window(self, coefficients):
         """window: a=0.000075, b=0.15."""
         coeffs = get_r_norm_coeffs("window", coefficients)
-        result = r_norm("window", 6601.0, coeffs)
+        result = r_norm(6601.0, coeffs)
         expected = 0.000075 * 6601.0 + 0.15
         assert pytest.approx(result, rel=1e-9) == expected
 

@@ -4,11 +4,14 @@
 """
 from __future__ import annotations
 from thermalkernel import refs
-from thermalkernel.data import get_r_norm_coeffs
+from thermalkernel.data import get_alpha, get_r_norm_coeffs, load_energy_classes, get_normative_heat_demand
 from thermalkernel.models import (
+    Building,
+    BuildingResult,
     CalcResult,
     Climate,
     Construction,
+    ConstructionHeatLoss,
     Layer,
     Material,
     OperationCondition,
@@ -91,7 +94,7 @@ def gsop(t_v: float, climate: Climate) -> float:
     return (t_v - climate.t_ot) * climate.z_ot
 
 
-def r_norm(construction_type: str, gsop_value: float, coeffs: dict) -> float:
+def r_norm(gsop_value: float, coeffs: dict) -> float:
     """
     Нормируемое (требуемое) сопротивление теплопередаче, м²·°C/Вт.
 
@@ -114,6 +117,184 @@ def _extra_insulation_mm(
     Рассчитывается для λ минваты (условие Б) как типового утеплителя.
     """
     return r_deficit * lambda_insulation * 1000.0
+
+
+def q_transmission_single(
+    construction: Construction,
+    climate: Climate,
+    t_v: float,
+    materials: dict[str, Material],
+    alpha_in: float,
+    alpha_out: float,
+) -> tuple[float, float]:
+    """
+    Трансмиссионные теплопотери одной ограждающей конструкции, Вт.
+
+    Q_тр_i = A_i · (tв − tн) · n_i / R₀_пр_i
+
+    tн — температура наиболее холодной пятидневки (t5) из климатических данных.
+
+    Ref: СП 50.13330.2012, п. 9.1; СП 60.13330.2020, п. 6.3 (TODO: сверить пункты).
+
+    Возвращает (q_w, r0_pr): теплопотери в Вт и приведённое сопротивление конструкции.
+    """
+    r0u, _ = r0_usl(construction, materials, alpha_in, alpha_out)
+    r0p = r0_pr(r0u)
+    # tн = температура наиболее холодной пятидневки
+    delta_t = t_v - climate.t5
+    q_w = construction.area * delta_t * construction.n / r0p
+    return q_w, r0p
+
+
+def q_infiltration(
+    building: Building,
+    climate: Climate,
+    coefficients: dict,
+) -> float:
+    """
+    Инфильтрационные теплопотери здания, Вт.
+
+    Принята упрощённая модель:
+        Q_инф = c_в · ρ_в · V · n_ин · (tв − tн) / 3600
+
+    где:
+        c_в   — удельная теплоёмкость воздуха, кДж/(кг·°C)
+        ρ_в   — плотность воздуха, кг/м³
+        V     — отапливаемый объём здания, м³
+        n_ин  — кратность инфильтрации, 1/ч
+        tв    — расчётная температура внутреннего воздуха, °C
+        tн    — температура наиболее холодной пятидневки (t5), °C
+
+    Результат — Вт. c_в задан в кДж/(кг·°C), поэтому перевод единиц: × 1000 (кДж→Дж) / 3600 (ч→с) = Дж/с = Вт.
+
+    TODO: уточнить по СП 60.13330.2020, п. 8. Значения n_ин и параметры воздуха предварительные.
+
+    Ref: СП 60.13330.2020, п. 8 (TODO: сверить пункт).
+    """
+    inf_cfg = coefficients["infiltration"]
+    c_air = inf_cfg["c_air"]["value"]       # кДж/(кг·°C)
+    rho_air = inf_cfg["rho_air"]["value"]   # кг/м³
+    n_inf = inf_cfg["n_infiltration"]["value"]  # 1/ч
+    delta_t = building.t_v - climate.t5    # °C
+    # Вт = кДж/(кг·°C) · кг/м³ · м³ · 1/ч · °C · (1000 Дж/кДж) / (3600 с/ч)
+    q_w = c_air * rho_air * building.heated_volume * n_inf * delta_t * 1000.0 / 3600.0
+    return q_w
+
+
+def specific_heat_demand(
+    q_total_w: float,
+    building: Building,
+    climate: Climate,
+) -> float:
+    """
+    Удельный расход тепловой энергии на отопление, кВт·ч/(м²·год).
+
+    Упрощённая формула:
+        q_уд = Q_сум · z_от · 24 / (А_от · 1000)
+
+    где:
+        Q_сум — суммарные теплопотери здания в расчётных условиях, Вт
+        z_от  — продолжительность отопительного периода, сут
+        24    — число часов в сутках
+        А_от  — отапливаемая площадь, м²
+        1000  — перевод Вт → кВт
+
+    Ref: СП 50.13330.2012, п. 10.1 (TODO: сверить номер пункта и формулу).
+    """
+    return q_total_w * climate.z_ot * 24.0 / (building.heated_area * 1000.0)
+
+
+def energy_class(specific_demand: float, normative_demand: float) -> str:
+    """
+    Класс энергетической эффективности здания по отклонению от нормативного.
+
+    delta = (q_уд − q_норм) / q_норм
+
+    Пороги класса берутся из справочника energy_classes.json.
+
+    Ref: СП 50.13330.2012, прил. Б, табл. Б.1 (TODO: сверить).
+    """
+    classes = load_energy_classes()
+    delta = (specific_demand - normative_demand) / normative_demand
+    for entry in classes:
+        d_min = entry["delta_min"]
+        d_max = entry["delta_max"]
+        # delta_min=None означает нет нижней границы (самый высокий класс)
+        # delta_max=None означает нет верхней границы (самый низкий класс)
+        below_max = (d_max is None) or (delta < d_max)
+        above_min = (d_min is None) or (delta >= d_min)
+        if above_min and below_max:
+            return entry["class"]
+    # Защитный fallback — не должен достигаться при корректном справочнике
+    return classes[-1]["class"]
+
+
+def evaluate_building(
+    building: Building,
+    climate: Climate,
+    materials: dict[str, Material],
+    coefficients: dict,
+) -> BuildingResult:
+    """
+    Полный расчёт теплопотерь и класса энергоэффективности здания.
+
+    Шаги:
+    1. Трансмиссионные теплопотери для каждой ограждающей конструкции.
+    2. Инфильтрационные теплопотери.
+    3. Суммарные теплопотери.
+    4. Удельный расход тепловой энергии на отопление, кВт·ч/(м²·год).
+    5. Базовый (нормируемый) удельный расход по типу и этажности.
+    6. Класс энергоэффективности по отклонению от базового.
+
+    Ref: СП 50.13330.2012, пп. 9.1, 10.1, прил. Б; СП 60.13330.2020, п. 8.
+    """
+    per_construction: list[ConstructionHeatLoss] = []
+    q_tr_total = 0.0
+
+    alpha_in, alpha_out = get_alpha(coefficients)
+
+    for constr in building.constructions:
+        q_w, r0p = q_transmission_single(constr, climate, building.t_v, materials, alpha_in, alpha_out)
+        q_tr_total += q_w
+        per_construction.append(ConstructionHeatLoss(
+            construction_type=constr.type.value,
+            area=constr.area,
+            r0_pr=r0p,
+            heat_loss_w=q_w,
+        ))
+
+    q_inf = q_infiltration(building, climate, coefficients)
+    q_total = q_tr_total + q_inf
+
+    q_sp = specific_heat_demand(q_total, building, climate)
+
+    norm_demand = get_normative_heat_demand(
+        building.building_type.value, building.floors, coefficients
+    )
+
+    en_class = energy_class(q_sp, norm_demand)
+
+    delta = (q_sp - norm_demand) / norm_demand
+
+    sp_refs = [
+        refs.Q_TRANSMISSION,
+        refs.Q_INFILTRATION,
+        refs.SPECIFIC_HEAT_DEMAND,
+        refs.NORMATIVE_HEAT_DEMAND,
+        refs.ENERGY_CLASS,
+    ]
+
+    return BuildingResult(
+        q_transmission_w=q_tr_total,
+        q_infiltration_w=q_inf,
+        q_total_w=q_total,
+        specific_heat_demand=q_sp,
+        normative_heat_demand=norm_demand,
+        delta_from_norm=delta,
+        energy_class=en_class,
+        per_construction=per_construction,
+        sp_refs=sp_refs,
+    )
 
 
 def evaluate(
@@ -151,7 +332,7 @@ def evaluate(
 
     # шаг 5: нормируемое
     coeffs_rn = get_r_norm_coeffs(construction.type.value, coefficients)
-    r_norm_val = r_norm(construction.type.value, gsop_val, coeffs_rn)
+    r_norm_val = r_norm(gsop_val, coeffs_rn)
 
     # шаг 6: вердикт
     ok = r0p >= r_norm_val

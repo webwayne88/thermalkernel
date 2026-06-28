@@ -1,9 +1,11 @@
 import argparse
+import json
 import sys
+from pathlib import Path
 
-from thermalkernel.calc import evaluate
+from thermalkernel.calc import evaluate, evaluate_building
 from thermalkernel.data import get_climate, get_material, load_climate, load_coefficients, load_materials
-from thermalkernel.models import Construction, ConstructionType, Layer, OperationCondition
+from thermalkernel.models import Building, BuildingType, Construction, ConstructionType, Layer, OperationCondition
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -72,6 +74,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--list-cities",
         action="store_true",
         help="Показать список доступных городов и выйти",
+    )
+    parser.add_argument(
+        "--building",
+        metavar="FILE.json",
+        help="Расчёт здания (класс энергоэффективности). Передать путь к JSON-описанию здания.",
+    )
+    parser.add_argument(
+        "--demo-building",
+        action="store_true",
+        help="Запустить демо-расчёт здания (встроенный пример).",
     )
     return parser
 
@@ -201,6 +213,142 @@ def print_report(args: argparse.Namespace) -> None:
     print()
 
 
+def _make_demo_building() -> Building:
+    """
+    Встроенный демо-пример здания для быстрой проверки.
+
+    Трёхэтажный жилой дом в Москве:
+    - стена:  кирпич 0.51 м + минвата 0.1 м, A=300 м²
+    - крыша:  минвата 0.2 м, A=200 м²
+    - окна:   однокамерный стеклопакет, A=60 м²
+    - отапливаемая площадь: 600 м², объём: 1800 м³
+    """
+    constructions = [
+        Construction(
+            type=ConstructionType.WALL,
+            layers=[
+                Layer(material="kirpich_keramicheskiy", thickness=0.51),
+                Layer(material="minvata", thickness=0.10),
+            ],
+            area=300.0,
+            operation_condition=OperationCondition.B,
+        ),
+        Construction(
+            type=ConstructionType.ROOF,
+            layers=[
+                Layer(material="minvata", thickness=0.20),
+            ],
+            area=200.0,
+            operation_condition=OperationCondition.B,
+        ),
+        Construction(
+            type=ConstructionType.WINDOW,
+            layers=[
+                Layer(material="steklo", thickness=0.006),
+            ],
+            area=60.0,
+            operation_condition=OperationCondition.B,
+        ),
+    ]
+    return Building(
+        city="moscow",
+        building_type=BuildingType.RESIDENTIAL,
+        floors=3,
+        t_v=20.0,
+        constructions=constructions,
+        heated_area=600.0,
+        heated_volume=1800.0,
+    )
+
+
+def _load_building_from_json(path: str) -> Building:
+    """Загружает описание здания из JSON-файла."""
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        print(f"Ошибка: файл '{path}' не найден.", file=sys.stderr)
+        sys.exit(1)
+    except json.JSONDecodeError as e:
+        print(f"Ошибка разбора JSON: {e}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        return Building(**raw)
+    except Exception as e:
+        print(f"Ошибка при создании модели здания: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def print_building_report(building: Building) -> None:
+    """Выводит отчёт по расчёту здания: теплопотери и класс энергоэффективности."""
+    materials = load_materials()
+    climates = load_climate()
+    coefficients = load_coefficients()
+
+    try:
+        climate = get_climate(building.city, climates)
+    except KeyError as e:
+        print(f"Ошибка: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        result = evaluate_building(building, climate, materials, coefficients)
+    except Exception as e:
+        print(f"Ошибка расчёта здания: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    print()
+    print("=" * 65)
+    print("  РАСЧЁТ ЗДАНИЯ. ТЕПЛОПОТЕРИ И КЛАСС ЭНЕРГОЭФФЕКТИВНОСТИ")
+    print("  СП 50.13330.2012 / СП 60.13330.2020")
+    print("=" * 65)
+    print()
+    print("ИСХОДНЫЕ ДАННЫЕ")
+    print(f"  Город                   : {climate.city}")
+    print(f"  Тип здания              : {building.building_type.value}")
+    print(f"  Этажей                  : {building.floors}")
+    print(f"  tв                      : {building.t_v:.1f} °C")
+    print(f"  tн (t5)                 : {climate.t5:.1f} °C")
+    print(f"  Отопит. период          : {climate.z_ot:.0f} сут  (tот={climate.t_ot:.1f} °C)")
+    print(f"  Отапливаемая площадь    : {building.heated_area:.1f} м²")
+    print(f"  Отапливаемый объём      : {building.heated_volume:.1f} м³")
+    print()
+    print("ТРАНСМИССИОННЫЕ ТЕПЛОПОТЕРИ ПО КОНСТРУКЦИЯМ")
+    print(f"  {'Тип':<10} {'Площадь, м²':>12} {'R₀_пр, м²·°C/Вт':>18} {'Q_тр, Вт':>10}")
+    print(f"  {'-'*10} {'-'*12} {'-'*18} {'-'*10}")
+    for item in result.per_construction:
+        print(
+            f"  {item.construction_type:<10} {item.area:>12.1f} "
+            f"{item.r0_pr:>18.3f} {item.heat_loss_w:>10.1f}"
+        )
+    print(f"  {'ИТОГО':>43} {result.q_transmission_w:>10.1f}")
+    print(f"    Ref: {result.sp_refs[0]}")
+    print()
+    print("ИНФИЛЬТРАЦИОННЫЕ ТЕПЛОПОТЕРИ")
+    print(f"  Q_инф = {result.q_infiltration_w:.1f} Вт")
+    print(f"    Ref: {result.sp_refs[1]}")
+    print()
+    print("-" * 65)
+    print(f"  Q_суммарные             = {result.q_total_w:.1f} Вт")
+    print()
+    print("УДЕЛЬНЫЙ РАСХОД ТЕПЛОВОЙ ЭНЕРГИИ НА ОТОПЛЕНИЕ")
+    print(f"  q_уд                    = {result.specific_heat_demand:.1f} кВт·ч/(м²·год)")
+    print(f"  q_норм (базовое)        = {result.normative_heat_demand:.1f} кВт·ч/(м²·год)")
+    delta_pct = result.delta_from_norm * 100.0
+    sign = "+" if delta_pct >= 0 else ""
+    print(f"  Отклонение от нормы     = {sign}{delta_pct:.1f}%")
+    print(f"    Ref: {result.sp_refs[2]}")
+    print(f"    Ref: {result.sp_refs[3]}")
+    print()
+    print("-" * 65)
+    print(f"  КЛАСС ЭНЕРГОЭФФЕКТИВНОСТИ : {result.energy_class}")
+    print(f"    Ref: {result.sp_refs[4]}")
+    print("-" * 65)
+    print()
+    print("ВНИМАНИЕ: расчёт носит вспомогательный характер. Коэффициенты")
+    print("инфильтрации и пороги классов требуют сверки с актуальной редакцией СП.")
+    print()
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -211,6 +359,16 @@ def main() -> None:
 
     if args.list_cities:
         print_cities()
+        return
+
+    if args.demo_building:
+        building = _make_demo_building()
+        print_building_report(building)
+        return
+
+    if args.building:
+        building = _load_building_from_json(args.building)
+        print_building_report(building)
         return
 
     print_report(args)

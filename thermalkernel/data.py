@@ -48,28 +48,28 @@ def load_coefficients() -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _lookup(mapping: dict, key: str, entity_name: str):
+    """Ищет key в mapping, при отсутствии бросает KeyError с перечнем доступных."""
+    if key not in mapping:
+        available = ", ".join(mapping.keys())
+        raise KeyError(
+            f"{entity_name} '{key}' не найден в справочнике. Доступные: {available}"
+        )
+    return mapping[key]
+
+
 def get_material(key: str, materials: dict[str, Material] | None = None) -> Material:
     """Возвращает материал по ключу. Неизвестный ключ — явная ошибка."""
     if materials is None:
         materials = load_materials()
-    if key not in materials:
-        available = ", ".join(materials.keys())
-        raise KeyError(
-            f"Материал '{key}' не найден в справочнике. Доступные: {available}"
-        )
-    return materials[key]
+    return _lookup(materials, key, "Материал")
 
 
 def get_climate(city_key: str, climates: dict[str, Climate] | None = None) -> Climate:
     """Возвращает климатические данные по ключу города. Неизвестный город — явная ошибка."""
     if climates is None:
         climates = load_climate()
-    if city_key not in climates:
-        available = ", ".join(climates.keys())
-        raise KeyError(
-            f"Город '{city_key}' не найден в справочнике. Доступные: {available}"
-        )
-    return climates[city_key]
+    return _lookup(climates, city_key, "Город")
 
 
 def get_r_norm_coeffs(construction_type: str, coefficients: dict | None = None) -> dict:
@@ -83,6 +83,42 @@ def get_r_norm_coeffs(construction_type: str, coefficients: dict | None = None) 
             f"Тип конструкции '{construction_type}' не найден. Доступные: {available}"
         )
     return r_norm[construction_type]
+
+
+@lru_cache(maxsize=1)
+def load_energy_classes() -> tuple[dict, ...]:
+    """Загружает шкалу классов энергоэффективности из JSON."""
+    path = _DATA_DIR / "energy_classes.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    return tuple(raw["classes"])
+
+
+def get_normative_heat_demand(
+    building_type: str,
+    floors: int,
+    coefficients: dict | None = None,
+) -> float:
+    """
+    Возвращает базовый нормируемый удельный расход тепловой энергии, кВт·ч/(м²·год).
+
+    Выбор по типу здания и числу этажей.
+    Неизвестный тип → явная ошибка.
+    """
+    if coefficients is None:
+        coefficients = load_coefficients()
+    base = coefficients["specific_heat_demand_base"]
+    if building_type not in base:
+        available = [k for k in base.keys() if not k.startswith("_")]
+        raise KeyError(
+            f"Тип здания '{building_type}' не найден. Доступные: {available}"
+        )
+    by_floors = base[building_type]["by_floors"]
+    if floors <= 3:
+        return float(by_floors["3_or_less"])
+    elif floors <= 9:
+        return float(by_floors["4_to_9"])
+    else:
+        return float(by_floors["10_and_more"])
 
 
 def get_alpha(coefficients: dict | None = None) -> tuple[float, float]:
